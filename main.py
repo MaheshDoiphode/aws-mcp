@@ -54,10 +54,10 @@ except ImportError as e:
     stdio_server = None
 
 
-class AWSS3MCPServer:
+class AWSMCPServer:
     def __init__(self):
         if MCP_SDK_AVAILABLE:
-            self.server = Server("aws-s3-mcp-server")
+            self.server = Server("aws-mcp-server")
             self._setup_tool_handlers()
         else:
             self.server = None # Mock server
@@ -110,57 +110,149 @@ class AWSS3MCPServer:
                         },
                         "required": [],
                     },
+                ),
+                Tool(
+                    name="list_eks_clusters",
+                    description="Lists EKS clusters using the configured AWS profile. Optionally takes a profile name and region.",
+                    inputSchema={
+                        "type": "object",
+                        "properties": {
+                            "profile_name": {
+                                "type": "string",
+                                "description": "The AWS CLI profile name to use. If not provided, the default profile is used.",
+                            },
+                            "region_name": {
+                                "type": "string",
+                                "description": "The AWS region to use. If not provided, the default configured region for the profile is used.",
+                            },
+                            "include_all": {
+                                "type": "boolean",
+                                "description": "Include all cluster details (equivalent to --include all flag). Default is false.",
+                                "default": False
+                            }
+                        },
+                        "required": [],
+                    },
                 )
             ]
 
         @self.server.call_tool()
         async def handle_call_tool(name: str, arguments: dict) -> list[TextContent]:
-            if name != "list_s3_buckets":
+            if name == "list_s3_buckets":
+                return await self._handle_s3_list_buckets(arguments)
+            elif name == "list_eks_clusters":
+                return await self._handle_eks_list_clusters(arguments)
+            else:
                 raise McpError(
                     ErrorCode.MethodNotFound,
                     f"Unknown tool: {name}",
                 )
 
-            profile_name = arguments.get("profile_name")
-            region_name = arguments.get("region_name")
+    async def _handle_s3_list_buckets(self, arguments: dict) -> list[TextContent]:
+        """Handle S3 bucket listing"""
+        profile_name = arguments.get("profile_name")
+        region_name = arguments.get("region_name")
 
-            try:
-                session_params = {}
-                if profile_name:
-                    session_params["profile_name"] = profile_name
-                if region_name:
-                    session_params["region_name"] = region_name
-                
-                session = boto3.Session(**session_params)
-                
-                # Check SSL verification setting
-                verify_ssl = self._check_ssl_verification(profile_name)
-                
-                # Create S3 client with SSL verification setting
-                s3_client = session.client("s3", verify=verify_ssl)
-                
-                if not verify_ssl:
-                    # Suppress SSL warnings when verification is disabled
-                    import urllib3
-                    urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+        try:
+            session_params = {}
+            if profile_name:
+                session_params["profile_name"] = profile_name
+            if region_name:
+                session_params["region_name"] = region_name
+            
+            session = boto3.Session(**session_params)
+            
+            # Check SSL verification setting
+            verify_ssl = self._check_ssl_verification(profile_name)
+            
+            # Create S3 client with SSL verification setting
+            s3_client = session.client("s3", verify=verify_ssl)
+            
+            if not verify_ssl:
+                # Suppress SSL warnings when verification is disabled
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
 
-                response = s3_client.list_buckets()
-                buckets = [bucket["Name"] for bucket in response.get("Buckets", [])]
-                
-                result_text = json.dumps(buckets, indent=2)
-                return [TextContent(type="text", text=result_text)]
+            response = s3_client.list_buckets()
+            buckets = [bucket["Name"] for bucket in response.get("Buckets", [])]
+            
+            result_text = json.dumps(buckets, indent=2)
+            return [TextContent(type="text", text=result_text)]
 
-            except (NoCredentialsError, PartialCredentialsError) as e:
-                error_message = f"AWS credentials not found or incomplete. Ensure AWS CLI is configured. Profile: {profile_name or 'default'}. Error: {str(e)}"
-                return [TextContent(type="text", text=error_message)]
-            except ClientError as e:
-                error_message = f"AWS ClientError: {e.response.get('Error', {}).get('Code', 'Unknown')} - {e.response.get('Error', {}).get('Message', 'No message')}. Profile: {profile_name or 'default'}."
-                if "SSL: CERTIFICATE_VERIFY_FAILED" in str(e):
-                    error_message += " SSL verification failed. Check if 'cli_ignore_ssl_verification = true' is set in your AWS config for the profile, or if a custom CA bundle is needed via AWS_CA_BUNDLE."
-                return [TextContent(type="text", text=error_message)]
-            except Exception as e:
-                error_message = f"An unexpected error occurred: {str(e)}. Profile: {profile_name or 'default'}."
-                return [TextContent(type="text", text=error_message)]
+        except (NoCredentialsError, PartialCredentialsError) as e:
+            error_message = f"AWS credentials not found or incomplete. Ensure AWS CLI is configured. Profile: {profile_name or 'default'}. Error: {str(e)}"
+            return [TextContent(type="text", text=error_message)]
+        except ClientError as e:
+            error_message = f"AWS ClientError: {e.response.get('Error', {}).get('Code', 'Unknown')} - {e.response.get('Error', {}).get('Message', 'No message')}. Profile: {profile_name or 'default'}."
+            if "SSL: CERTIFICATE_VERIFY_FAILED" in str(e):
+                error_message += " SSL verification failed. Check if 'cli_ignore_ssl_verification = true' is set in your AWS config for the profile, or if a custom CA bundle is needed via AWS_CA_BUNDLE."
+            return [TextContent(type="text", text=error_message)]
+        except Exception as e:
+            error_message = f"An unexpected error occurred: {str(e)}. Profile: {profile_name or 'default'}."
+            return [TextContent(type="text", text=error_message)]
+
+    async def _handle_eks_list_clusters(self, arguments: dict) -> list[TextContent]:
+        """Handle EKS cluster listing"""
+        profile_name = arguments.get("profile_name")
+        region_name = arguments.get("region_name")
+        include_all = arguments.get("include_all", False)
+
+        try:
+            session_params = {}
+            if profile_name:
+                session_params["profile_name"] = profile_name
+            if region_name:
+                session_params["region_name"] = region_name
+            
+            session = boto3.Session(**session_params)
+            
+            # Check SSL verification setting
+            verify_ssl = self._check_ssl_verification(profile_name)
+            
+            # Create EKS client with SSL verification setting
+            eks_client = session.client("eks", verify=verify_ssl)
+            
+            if not verify_ssl:
+                # Suppress SSL warnings when verification is disabled
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+
+            # List clusters
+            response = eks_client.list_clusters()
+            clusters = response.get("clusters", [])
+            
+            if include_all and clusters:
+                # Get detailed information for each cluster
+                cluster_details = []
+                for cluster_name in clusters:
+                    try:
+                        cluster_info = eks_client.describe_cluster(name=cluster_name)
+                        cluster_details.append(cluster_info["cluster"])
+                    except ClientError as e:
+                        # If we can't describe a cluster, include basic info with error
+                        cluster_details.append({
+                            "name": cluster_name,
+                            "error": f"Could not describe cluster: {e.response.get('Error', {}).get('Message', 'Unknown error')}"
+                        })
+                
+                result_text = json.dumps(cluster_details, indent=2, default=str)
+            else:
+                # Just return cluster names (similar to your working command)
+                result_text = json.dumps({"clusters": clusters}, indent=2)
+            
+            return [TextContent(type="text", text=result_text)]
+
+        except (NoCredentialsError, PartialCredentialsError) as e:
+            error_message = f"AWS credentials not found or incomplete. Ensure AWS CLI is configured. Profile: {profile_name or 'default'}. Error: {str(e)}"
+            return [TextContent(type="text", text=error_message)]
+        except ClientError as e:
+            error_message = f"AWS ClientError: {e.response.get('Error', {}).get('Code', 'Unknown')} - {e.response.get('Error', {}).get('Message', 'No message')}. Profile: {profile_name or 'default'}."
+            if "SSL: CERTIFICATE_VERIFY_FAILED" in str(e):
+                error_message += " SSL verification failed. Check if 'cli_ignore_ssl_verification = true' is set in your AWS config for the profile, or if a custom CA bundle is needed via AWS_CA_BUNDLE."
+            return [TextContent(type="text", text=error_message)]
+        except Exception as e:
+            error_message = f"An unexpected error occurred: {str(e)}. Profile: {profile_name or 'default'}."
+            return [TextContent(type="text", text=error_message)]
 
     async def _handle_call_tool_mock(self, request):
         """Mock version for when MCP SDK is not available"""
@@ -172,12 +264,18 @@ class AWSS3MCPServer:
             name = request.name if hasattr(request, 'name') else 'list_s3_buckets'
             args = request.arguments if hasattr(request, 'arguments') else {}
 
-        if name != "list_s3_buckets":
+        if name == "list_s3_buckets":
+            return await self._handle_s3_list_buckets_mock(args)
+        elif name == "list_eks_clusters":
+            return await self._handle_eks_list_clusters_mock(args)
+        else:
             raise McpError(
                 ErrorCode.MethodNotFound,
                 f"Unknown tool: {name}",
             )
 
+    async def _handle_s3_list_buckets_mock(self, args):
+        """Mock S3 bucket listing"""
         profile_name = args.get("profile_name")
         region_name = args.get("region_name")
 
@@ -218,23 +316,102 @@ class AWSS3MCPServer:
             error_message = f"An unexpected error occurred: {str(e)}. Profile: {profile_name or 'default'}."
             return {"content": [{"type": "text", "text": error_message}], "isError": True}
 
+    async def _handle_eks_list_clusters_mock(self, args):
+        """Mock EKS cluster listing"""
+        profile_name = args.get("profile_name")
+        region_name = args.get("region_name")
+        include_all = args.get("include_all", False)
+
+        try:
+            session_params = {}
+            if profile_name:
+                session_params["profile_name"] = profile_name
+            if region_name:
+                session_params["region_name"] = region_name
+            
+            session = boto3.Session(**session_params)
+            
+            # Check SSL verification setting
+            verify_ssl = self._check_ssl_verification(profile_name)
+            
+            # Create EKS client with SSL verification setting
+            eks_client = session.client("eks", verify=verify_ssl)
+            
+            if not verify_ssl:
+                # Suppress SSL warnings when verification is disabled
+                import urllib3
+                urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
+                print(f"SSL verification disabled for profile: {profile_name or 'default'}", file=sys.stderr)
+
+            # List clusters
+            response = eks_client.list_clusters()
+            clusters = response.get("clusters", [])
+            
+            if include_all and clusters:
+                # Get detailed information for each cluster
+                cluster_details = []
+                for cluster_name in clusters:
+                    try:
+                        cluster_info = eks_client.describe_cluster(name=cluster_name)
+                        cluster_details.append(cluster_info["cluster"])
+                    except ClientError as e:
+                        # If we can't describe a cluster, include basic info with error
+                        cluster_details.append({
+                            "name": cluster_name,
+                            "error": f"Could not describe cluster: {e.response.get('Error', {}).get('Message', 'Unknown error')}"
+                        })
+                
+                result_text = json.dumps(cluster_details, indent=2, default=str)
+            else:
+                # Just return cluster names (similar to your working command)
+                result_text = json.dumps({"clusters": clusters}, indent=2)
+            
+            return {"content": [{"type": "text", "text": result_text}]}
+
+        except (NoCredentialsError, PartialCredentialsError) as e:
+            error_message = f"AWS credentials not found or incomplete. Ensure AWS CLI is configured. Profile: {profile_name or 'default'}. Error: {str(e)}"
+            return {"content": [{"type": "text", "text": error_message}], "isError": True}
+        except ClientError as e:
+            error_message = f"AWS ClientError: {e.response.get('Error', {}).get('Code', 'Unknown')} - {e.response.get('Error', {}).get('Message', 'No message')}. Profile: {profile_name or 'default'}."
+            if "SSL: CERTIFICATE_VERIFY_FAILED" in str(e):
+                error_message += " SSL verification failed. Check if 'cli_ignore_ssl_verification = true' is set in your AWS config for the profile, or if a custom CA bundle is needed via AWS_CA_BUNDLE."
+            return {"content": [{"type": "text", "text": error_message}], "isError": True}
+        except Exception as e:
+            error_message = f"An unexpected error occurred: {str(e)}. Profile: {profile_name or 'default'}."
+            return {"content": [{"type": "text", "text": error_message}], "isError": True}
+
     async def run(self):
         if not MCP_SDK_AVAILABLE or self.server is None:
             print("MCP SDK not available. Cannot start server. Run 'pip install mcp' if you want to use it as a server.", file=sys.stderr)
             # Fallback to direct execution for testing if SDK is not present
-            if len(sys.argv) > 1 and sys.argv[1] == "test_list_buckets":
-                profile_to_test = sys.argv[2] if len(sys.argv) > 2 else None
-                region_to_test = sys.argv[3] if len(sys.argv) > 3 else None
-                print(f"Testing list_s3_buckets with profile: {profile_to_test}, region: {region_to_test}", file=sys.stderr)
-                mock_request = type('obj', (object,), {
-                    'name': 'list_s3_buckets',
-                    'arguments': {'profile_name': profile_to_test, 'region_name': region_to_test}
-                })
-                try:
-                    result = await self._handle_call_tool_mock(mock_request)
-                    print(f"Result: {result['content'][0]['text']}", file=sys.stdout)
-                except McpError as e:
-                    print(f"Error: {e}", file=sys.stderr)
+            if len(sys.argv) > 1:
+                if sys.argv[1] == "test_list_buckets":
+                    profile_to_test = sys.argv[2] if len(sys.argv) > 2 else None
+                    region_to_test = sys.argv[3] if len(sys.argv) > 3 else None
+                    print(f"Testing list_s3_buckets with profile: {profile_to_test}, region: {region_to_test}", file=sys.stderr)
+                    mock_request = type('obj', (object,), {
+                        'name': 'list_s3_buckets',
+                        'arguments': {'profile_name': profile_to_test, 'region_name': region_to_test}
+                    })
+                    try:
+                        result = await self._handle_call_tool_mock(mock_request)
+                        print(f"Result: {result['content'][0]['text']}", file=sys.stdout)
+                    except McpError as e:
+                        print(f"Error: {e}", file=sys.stderr)
+                elif sys.argv[1] == "test_list_eks":
+                    profile_to_test = sys.argv[2] if len(sys.argv) > 2 else None
+                    region_to_test = sys.argv[3] if len(sys.argv) > 3 else None
+                    include_all = sys.argv[4].lower() == 'true' if len(sys.argv) > 4 else False
+                    print(f"Testing list_eks_clusters with profile: {profile_to_test}, region: {region_to_test}, include_all: {include_all}", file=sys.stderr)
+                    mock_request = type('obj', (object,), {
+                        'name': 'list_eks_clusters',
+                        'arguments': {'profile_name': profile_to_test, 'region_name': region_to_test, 'include_all': include_all}
+                    })
+                    try:
+                        result = await self._handle_call_tool_mock(mock_request)
+                        print(f"Result: {result['content'][0]['text']}", file=sys.stdout)
+                    except McpError as e:
+                        print(f"Error: {e}", file=sys.stderr)
             return
 
         try:
@@ -257,8 +434,8 @@ if __name__ == "__main__":
         import asyncio
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     
-    print("Attempting to start AWSS3MCPServer instance...", file=sys.stderr)
-    server_instance = AWSS3MCPServer()
+    print("Attempting to start AWSMCPServer instance...", file=sys.stderr)
+    server_instance = AWSMCPServer()
     
     import asyncio
     try:
